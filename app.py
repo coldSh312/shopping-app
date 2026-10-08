@@ -45,7 +45,6 @@ STORAGE_BACKEND = config('STORAGE_BACKEND', 'local').lower()
 DRIVE_URL = config('DRIVE_API_URL')
 DRIVE_TOKEN = config('DRIVE_API_TOKEN')
 DRIVE_MODE = STORAGE_BACKEND == 'google_drive'
-CLOUD_MODE = DRIVE_MODE or bool(DATABASE_URL)
 if STORAGE_BACKEND not in ('local', 'google_drive'):
     st.error('STORAGE_BACKEND צריך להיות local או google_drive.')
     st.stop()
@@ -53,10 +52,7 @@ APP_PASSWORD = config('APP_PASSWORD')
 APP_URL = config('APP_URL').rstrip('/')
 DB_PATH = config('DB_PATH', str(Path(__file__).parent / 'data/shopping.db'))
 
-# Cloud mode is fail-closed: no catalogue or list data before authentication.
-if CLOUD_MODE and len(APP_PASSWORD) < 12:
-    st.error('לפני הפעלה בענן יש להגדיר APP_PASSWORD באורך 12 תווים לפחות ב־Secrets.')
-    st.stop()
+# Optional family password. Blank or absent APP_PASSWORD permits app access.
 if APP_PASSWORD and not st.session_state.get('authenticated'):
     st.title('🛒 עגליסט')
     st.write('רשימת הקניות של הבית, תמיד יחד.')
@@ -323,7 +319,7 @@ def list_page(lid):
         with st.expander('לא מצאתם? הגדירו מוצר חדש'):
             product_form(list_id=lid)
     with st.expander('שיתוף ואפשרויות רשימה'):
-        st.caption('כל מי שיש לו גישה לאפליקציה וסיסמת המשפחה יכול לצפות ולערוך את כל הרשימות והקטלוג.')
+        st.caption('כל מי שיש לו גישה לאפליקציה יכול לצפות ולערוך את כל הרשימות והקטלוג.')
         if APP_URL:
             link = f'{APP_URL}/?list={quote(lid)}'
             st.code(link, language=None)
