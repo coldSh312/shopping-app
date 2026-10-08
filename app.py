@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import quote
 import streamlit as st
 from PIL import Image, ImageOps, UnidentifiedImageError
-from db import DB, UNITS, clean, quantity, uid
+from db import DB, UNITS, clean, quantity, uid, PRODUCT_ASSETS, default_product_image
 
 st.set_page_config(page_title='עגליסט | קניות ביחד', page_icon='🛒', layout='centered')
 st.markdown('''<style>
@@ -75,6 +75,7 @@ def storage(url, path, backend, endpoint, token):
         database = DriveDB(endpoint, token)
     else:
         database = DB(url, path)
+    # Initializes the one-time default product image migration on this version.
     database.init()
     return database
 
@@ -133,12 +134,19 @@ def product_form(existing=None, list_id=None):
         cid = st.selectbox('קטגוריה', ids, format_func=names.get,
                            index=ids.index(existing['category_id']) if existing else 0)
         unit = st.selectbox('יחידת מידה', UNITS, index=UNITS.index(existing.get('unit', UNITS[0])))
-        upload = st.file_uploader('תמונה — לא חובה', type=['jpg', 'jpeg', 'png', 'webp'])
+        preset = st.selectbox('תמונה מוכנה — לא חובה', [''] + list(PRODUCT_ASSETS),
+                              format_func=lambda x: x or 'בלי שינוי / תמונה שאעלה בעצמי')
+        upload = st.file_uploader('העלאת תמונה משלך', type=['jpg', 'jpeg', 'png', 'webp'])
+        st.caption('התמונות המוכנות הן להמחשה. תמונה שתעלו בעצמכם תקבל עדיפות.')
         remove = st.checkbox('הסרת התמונה הקיימת') if existing.get('image') else False
         qty = st.number_input('כמות לרשימה', min_value=0.01, max_value=100000., value=1., step=1.) if list_id else None
         submit = st.form_submit_button('שמירה והוספה לרשימה' if list_id else 'שמירת מוצר', type='primary', use_container_width=True)
     if submit:
         img = '' if remove else existing.get('image', '')
+        if preset and not remove:
+            img = default_product_image(preset) or img
+        elif not existing and not img and not remove:
+            img = default_product_image(name.strip())
         if upload:
             ok, img = action(photo, upload)
             if not ok:
@@ -160,11 +168,17 @@ def catalog():
     products = [p for p in db.products() if search.strip().casefold() in (p['name'] + p['category']).casefold()]
     if not products:
         st.info('אין מוצרים שמתאימים לחיפוש.')
+    st.caption('התמונות המוכנות הן תמונות המחשה, ללא מותגים.')
     for p in products:
-        with st.expander(f"{p['name']} · {p['category']}"):
+        with st.container(border=True):
+            st.subheader(p['name'])
+            st.caption(p['category'] + ' · ' + p['unit'])
             if p['image']:
-                st.image(base64.b64decode(p['image']), width=100)
-            product_form(p)
+                st.image(base64.b64decode(p['image']), width=120)
+            else:
+                st.caption('עדיין אין תמונה — אפשר לבחור תמונה מוכנה או להעלות תמונה בעריכה.')
+            with st.expander('עריכת מוצר ותמונה'):
+                product_form(p)
 
 
 def categories_page():

@@ -2,6 +2,10 @@
 from contextlib import contextmanager
 from pathlib import Path
 import math
+import base64
+import io
+from functools import lru_cache
+from PIL import Image
 import sqlite3
 import uuid
 
@@ -13,6 +17,31 @@ DEFAULTS = [('🥬 ירקות', [('מלפפונים', 'ק״ג'), ('עגבניו�
             ('🥚 ביצים', [('ביצים', 'חבילה')]),
             ('🥫 מזווה', [('אורז', 'ק״ג'), ('פסטה', 'חבילה')]),
             ('🧽 ניקיון ובית', []), ('🛒 אחר', [])]
+
+
+PRODUCT_ASSETS = {
+    'מלפפונים': 'cucumbers', 'עגבניות': 'tomatoes', 'תפוחים': 'apples',
+    'בננות': 'bananas', 'חלב': 'milk', 'קוטג׳': 'cottage_cheese',
+    'גבינה לבנה': 'white_cheese', 'לחם': 'bread', 'ביצים': 'eggs',
+    'אורז': 'rice', 'פסטה': 'pasta',
+}
+
+
+@lru_cache(maxsize=16)
+def default_product_image(name):
+    """Prepare a small database thumbnail from the bundled original asset."""
+    slug = PRODUCT_ASSETS.get(name)
+    if not slug:
+        return ''
+    path = Path(__file__).parent / 'assets' / 'products' / (slug + '.png')
+    if not path.is_file():
+        return ''
+    with Image.open(path) as source:
+        im = source.convert('RGB')
+        im.thumbnail((320, 320), Image.Resampling.LANCZOS)
+        output = io.BytesIO()
+        im.save(output, format='JPEG', quality=80, optimize=True)
+    return base64.b64encode(output.getvalue()).decode('ascii')
 
 
 def uid():
@@ -86,7 +115,8 @@ class DB:
                    product_id TEXT NOT NULL REFERENCES products(id), qty REAL NOT NULL CHECK(qty>0),
                    unit TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', bought INTEGER NOT NULL DEFAULT 0 CHECK(bought IN (0,1)),
                    UNIQUE(list_id, product_id))''',
-                'CREATE INDEX IF NOT EXISTS idx_items_list ON items(list_id)']
+                'CREATE INDEX IF NOT EXISTS idx_items_list ON items(list_id)',
+                'CREATE TABLE IF NOT EXISTS app_migrations (name TEXT PRIMARY KEY)']
             for sql in statements:
                 self.run(con, sql)
             if not self.run(con, 'SELECT id FROM categories LIMIT 1').fetchone():
@@ -95,6 +125,16 @@ class DB:
                     self.run(con, 'INSERT INTO categories VALUES (?,?,?)', (cid, name, pos))
                     for title, unit in products:
                         self.run(con, 'INSERT INTO products VALUES (?,?,?,?,?)', (uid(), title, cid, unit, ''))
+            # Fill existing empty images once; never replace the user's photos.
+            # The marker also preserves a user's deliberate image removal later.
+            migration = 'default_product_images_v1'
+            if not self.run(con, 'SELECT name FROM app_migrations WHERE name=?', (migration,)).fetchone():
+                images = {name: default_product_image(name) for name in PRODUCT_ASSETS}
+                if all(images.values()):
+                    for name, encoded in images.items():
+                        self.run(con, "UPDATE products SET image=? WHERE name=? AND image=''", (encoded, name))
+                    self.run(con, 'INSERT INTO app_migrations VALUES (?)', (migration,))
+
 
     def categories(self):
         return self.query('SELECT * FROM categories ORDER BY position,name')
