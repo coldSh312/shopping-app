@@ -80,6 +80,9 @@ def storage(url, path, backend, endpoint, token):
         database = DB(url, path)
     # Initializes the one-time default product image migration on this version.
     database.init()
+    if backend == 'google_drive':
+        from shopping_sync import ShoppingSync
+        database.shopping = ShoppingSync(database)
     return database
 
 
@@ -107,6 +110,9 @@ def action(function, *args, **kwargs):
 
 
 def go(lid, *, edit=False):
+    shopper = getattr(db, 'shopping', None)
+    if shopper and not edit:
+        shopper.refresh(lid, verify=False)
     st.query_params['list'] = lid
     st.query_params['view'] = 'edit' if edit else 'shop'
     st.rerun()
@@ -242,7 +248,9 @@ def home():
 
 
 def change_bought(lid, iid, key, previous):
-    ok, _ = action(db.set_bought, lid, iid, bool(st.session_state[key]))
+    shopper = getattr(db, 'shopping', None)
+    setter = shopper.set_bought if shopper else db.set_bought
+    ok, _ = action(setter, lid, iid, bool(st.session_state[key]))
     if not ok:
         st.session_state[key] = previous
 
@@ -259,7 +267,10 @@ def item_card(row, lid, *, editing=False):
                     st.write(label)
                 else:
                     key = f"check_{row['id']}_{row['bought']}"
-                    st.checkbox(label, value=bool(row['bought']), key=key, width='stretch',
+                    # Reconcile a failed background save even when it finishes
+                    # before the UI ever renders the optimistic checkbox key.
+                    st.session_state[key] = bool(row['bought'])
+                    st.checkbox(label, key=key, width='stretch',
                                 on_change=change_bought,
                                 args=(lid, row['id'], key, bool(row['bought'])))
         if not editing:
@@ -281,10 +292,29 @@ def item_card(row, lid, *, editing=False):
                     st.rerun()
 
 
-@st.fragment(run_every='20s')
+@st.fragment(run_every='1s' if DRIVE_MODE else '20s')
 def shopping_items(lid):
+    shopper = getattr(db, 'shopping', None)
     try:
-        rows = db.items(lid)
+        if shopper:
+            state = shopper.view(lid)
+            rows = state['rows']
+            if state['pending']:
+                st.caption(f"☁️ שומר {state['pending']} סימונים… אפשר להמשיך בקנייה; המתינו לאישור לפני הסגירה.")
+            elif state['error']:
+                st.error('השמירה לא אושרה. ' + state['error'])
+            elif not state['loading'] and not state['sync_error']:
+                st.caption('✓ הסימונים נשמרו' if state['saved'] else '✓ הרשימה מסונכרנת')
+            if state['sync_error']:
+                st.warning(state['sync_error'])
+            if state['error'] or state['sync_error']:
+                if st.button('בדיקה מחדש מול Drive', key='refresh_' + lid):
+                    shopper.refresh(lid)
+            if state['loading']:
+                st.caption('טוען את הרשימה…')
+                return
+        else:
+            rows = db.items(lid)
     except ValueError as exc:
         st.error(str(exc))
         return

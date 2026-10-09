@@ -177,11 +177,20 @@ class DriveDB(DB):
                 con.close()
 
     def set_bought(self, lid, iid, bought):
+        return self.set_bought_batch([(lid, iid, bought)])
+
+    def set_bought_batch(self, changes):
         # Explicit set (not toggle) is safe to reapply after a confirmed conflict.
         with self.lock:
             for attempt in range(2):
                 try:
-                    return super().set_bought(lid, iid, bought)
+                    with self.conn() as con:
+                        for lid, iid, bought in changes:
+                            changed = con.execute('UPDATE items SET bought=? WHERE id=? AND list_id=?',
+                                                  (int(bought), iid, lid)).rowcount
+                            if not changed:
+                                raise DriveError('מוצר הוסר מהרשימה במכשיר אחר. רעננו ובדקו את הרשימה.')
+                    return
                 except DriveConflict:
                     if attempt:
                         raise
@@ -195,6 +204,11 @@ class DriveDB(DB):
                 return [dict(row) for row in con.execute(sql, args).fetchall()]
             finally:
                 con.close()
+
+    def refresh_items(self, lid):
+        with self.lock:
+            self._snapshot(fresh=True)
+            return self.items(lid)
 
     def import_empty(self, raw):
         """One-time migration, refusing to replace any existing Drive database."""
