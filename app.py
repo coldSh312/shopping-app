@@ -25,6 +25,9 @@ h1,h2,h3,p, label {text-align:right;}
 [data-testid="stRadio"] div[role="radiogroup"] {gap:8px;flex-wrap:wrap;}
 [data-testid="stRadio"] label {min-height:44px;}
 [data-testid="stCode"] {direction:ltr;text-align:left;}
+[class*="st-key-product-row-"] [data-testid="stHorizontalBlock"] {flex-wrap:nowrap!important;}
+[class*="st-key-product-row-"] [data-testid="stVerticalBlock"] {min-width:0;}
+[class*="st-key-product-row-"] [data-testid="stImage"] img {border-radius:12px;}
 .brand {font-size:13px;color:#16745A;font-weight:700;letter-spacing:1px;}
 @media(max-width:600px){.block-container {padding:1.2rem 1rem 3rem;}h1{font-size:2rem!important;}}
 </style>''', unsafe_allow_html=True)
@@ -103,8 +106,15 @@ def action(function, *args, **kwargs):
     return False, None
 
 
-def go(lid):
+def go(lid, *, edit=False):
     st.query_params['list'] = lid
+    st.query_params['view'] = 'edit' if edit else 'shop'
+    st.rerun()
+
+
+def back_to_lists():
+    st.query_params.clear()
+    st.session_state['page'] = 'הרשימות שלי'
     st.rerun()
 
 
@@ -171,12 +181,12 @@ def catalog():
     st.caption('התמונות המוכנות הן תמונות המחשה, ללא מותגים.')
     for p in products:
         with st.container(border=True):
-            st.subheader(p['name'])
-            st.caption(p['category'] + ' · ' + p['unit'])
-            if p['image']:
-                st.image(base64.b64decode(p['image']), width=120)
-            else:
-                st.caption('עדיין אין תמונה — אפשר לבחור תמונה מוכנה או להעלות תמונה בעריכה.')
+            with st.container(horizontal=True, wrap=False, vertical_alignment='center'):
+                if p['image']:
+                    st.image(base64.b64decode(p['image']), width=64)
+                with st.container(width='stretch'):
+                    st.subheader(p['name'])
+                    st.caption(p['category'] + ' · ' + p['unit'])
             with st.expander('עריכת מוצר ותמונה'):
                 product_form(p)
 
@@ -221,7 +231,7 @@ def home():
             if st.form_submit_button('יצירת רשימה', type='primary', use_container_width=True):
                 ok, lid = action(db.create_list, name, source or None)
                 if ok:
-                    go(lid)
+                    go(lid, edit=True)
     for row in db.lists():
         with st.container(border=True):
             st.subheader(row['name'])
@@ -231,19 +241,26 @@ def home():
                 go(row['id'])
 
 
-def item_card(row, lid):
-    with st.container(border=True):
-        checked = st.checkbox(f"{row['name']} · {row['qty']:g} {row['unit']}", value=bool(row['bought']),
-                              key=f"check_{row['id']}_{row['bought']}")
-        if checked != bool(row['bought']):
-            ok, _ = action(db.set_bought, lid, row['id'], checked)
-            if ok:
-                st.rerun()
-        if row['image']:
-            st.image(base64.b64decode(row['image']), width=84)
-        if row['note']:
-            st.caption(row['note'])
-        with st.expander('כמות, הערה והסרה'):
+def item_card(row, lid, *, editing=False):
+    """One compact image/text row; edit controls exist only on the editor page."""
+    with st.container(border=True, key='product-row-' + row['id']):
+        with st.container(horizontal=True, wrap=False, vertical_alignment='center', gap='small'):
+            if row['image']:
+                st.image(base64.b64decode(row['image']), width=64)
+            with st.container(width='stretch'):
+                label = f"{row['name']} · {row['qty']:g} {row['unit']}"
+                if editing:
+                    st.write(label)
+                else:
+                    checked = st.checkbox(label, value=bool(row['bought']),
+                                          key=f"check_{row['id']}_{row['bought']}", width='stretch')
+                    if checked != bool(row['bought']):
+                        ok, _ = action(db.set_bought, lid, row['id'], checked)
+                        if ok:
+                            st.rerun()
+        if not editing:
+            return
+        with st.expander('עריכת כמות, הערה והסרה'):
             with st.form('edit_' + row['id']):
                 qty = st.number_input('כמות', min_value=0.01, max_value=100000., value=float(row['qty']), step=1.)
                 unit = st.selectbox('יחידה', UNITS, index=UNITS.index(row['unit']))
@@ -271,7 +288,7 @@ def shopping_items(lid):
     done = [r for r in rows if r['bought']]
     st.progress(len(done) / len(rows) if rows else 0., text=f'{len(done)} בעגלה · {len(pending)} נשארו')
     if not rows:
-        st.info('הרשימה ריקה. הוסיפו את המוצר הראשון למעלה.')
+        st.info('הרשימה ריקה. לחצו על עריכה כדי להוסיף מוצרים.')
     elif not pending:
         st.success('הכול בעגלה. קנייה נעימה! 🎉')
     previous = None
@@ -280,10 +297,10 @@ def shopping_items(lid):
             st.subheader(row['category'])
             previous = row['category']
         item_card(row, lid)
-    with st.expander(f'כבר בעגלה ({len(done)})', expanded=False):
-        st.caption('ביטול הסימון מחזיר מוצר לרשימת הקניות.')
-        for row in done:
-            item_card(row, lid)
+    if done:
+        with st.expander(f'כבר בעגלה ({len(done)})', expanded=False):
+            for row in done:
+                item_card(row, lid)
 
 
 def list_page(lid):
@@ -291,14 +308,23 @@ def list_page(lid):
     if not lists:
         st.warning('הרשימה לא נמצאה. ייתכן שנמחקה.')
         if st.button('לכל הרשימות', use_container_width=True):
-            st.query_params.clear()
-            st.rerun()
+            back_to_lists()
         return
     current = lists[0]
-    if st.button('→ לכל הרשימות'):
-        st.query_params.clear()
-        st.rerun()
+    editing = st.query_params.get('view') == 'edit'
+    with st.container(horizontal=True, wrap=False, horizontal_alignment='distribute'):
+        if st.button('→ הרשימות שלי'):
+            back_to_lists()
+        if editing:
+            if st.button('סיימתי · לקניות', type='primary'):
+                go(lid)
+        elif st.button('עריכה', key='edit-list'):
+            go(lid, edit=True)
     st.subheader(current['name'])
+    if not editing:
+        shopping_items(lid)
+        return
+    st.caption('הכינו את הרשימה כאן. כשתסיימו, עברו למסך הקניות.')
     undo = st.session_state.get('undo')
     if undo and undo['list_id'] == lid:
         if st.button(f"ביטול הסרה: {undo['name']}", use_container_width=True):
@@ -355,40 +381,45 @@ def list_page(lid):
         if st.button('שכפול לקנייה חדשה', use_container_width=True):
             ok, new_id = action(db.create_list, current['name'][:85] + ' — עותק', lid)
             if ok:
-                go(new_id)
+                go(new_id, edit=True)
         confirm = st.checkbox('אני מאשר/ת למחוק את הרשימה הזאת', key='confirm_' + lid)
         if st.button('מחיקת הרשימה', disabled=not confirm, use_container_width=True):
             ok, _ = action(db.write, 'DELETE FROM lists WHERE id=?', (lid,))
             if ok:
-                st.query_params.clear()
-                st.rerun()
-    st.caption('שינויים משותפים מתעדכנים כל 5 שניות בזמן שהעמוד פתוח.')
-    shopping_items(lid)
+                back_to_lists()
+    rows = db.items(lid)
+    if rows:
+        st.subheader('המוצרים ברשימה')
+        for row in rows:
+            item_card(row, lid, editing=True)
 
 
-st.markdown('<div class="brand">קניות ביחד · פחות לשכוח</div>', unsafe_allow_html=True)
-st.title('🛒 עגליסט')
-if DRIVE_MODE:
-    st.caption('☁️ הנתונים והתמונות נשמרים ב־Google Drive המשפחתי')
-elif not DATABASE_URL:
-    st.caption('מצב מקומי · הנתונים נשמרים במחשב שמריץ את האפליקציה. לפני העלאה לענן יש לחבר מסד נתונים קבוע.')
-page = st.radio('ניווט', ['הרשימות שלי', 'מוצרים', 'קטגוריות'], horizontal=True, key='page', label_visibility='collapsed')
+# An open list is a separate page: no brand header, catalogue tabs or storage text.
+list_id = st.query_params.get('list')
 try:
-    if page == 'מוצרים':
-        catalog()
-    elif page == 'קטגוריות':
-        categories_page()
-    elif st.query_params.get('list'):
-        list_page(st.query_params['list'])
+    if list_id:
+        list_page(list_id)
     else:
-        home()
+        st.markdown('<div class="brand">קניות ביחד · פחות לשכוח</div>', unsafe_allow_html=True)
+        st.title('🛒 עגליסט')
+        page = st.radio('ניווט', ['הרשימות שלי', 'מוצרים', 'קטגוריות'], horizontal=True,
+                        key='page', label_visibility='collapsed')
+        if page == 'מוצרים':
+            catalog()
+        elif page == 'קטגוריות':
+            categories_page()
+        else:
+            home()
+        with st.expander('הגדרות ומידע'):
+            if DRIVE_MODE:
+                st.caption('☁️ הנתונים והתמונות נשמרים ב־Google Drive המשפחתי')
+            elif not DATABASE_URL:
+                st.caption('מצב מקומי · הנתונים נשמרים במחשב שמריץ את האפליקציה.')
+            if APP_PASSWORD and st.button('יציאה'):
+                st.session_state.clear()
+                st.rerun()
 except ValueError as exc:
     st.error(str(exc))
 except Exception:
     logging.exception('Page failed')
     st.error('לא ניתן לטעון את הנתונים כרגע. רעננו את העמוד ונסו שוב.')
-if APP_PASSWORD:
-    with st.expander('חשבון משפחתי'):
-        if st.button('יציאה', use_container_width=True):
-            st.session_state.clear()
-            st.rerun()
