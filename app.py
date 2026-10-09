@@ -241,6 +241,12 @@ def home():
                 go(row['id'])
 
 
+def change_bought(lid, iid, key, previous):
+    ok, _ = action(db.set_bought, lid, iid, bool(st.session_state[key]))
+    if not ok:
+        st.session_state[key] = previous
+
+
 def item_card(row, lid, *, editing=False):
     """One compact image/text row; edit controls exist only on the editor page."""
     with st.container(border=True, key='product-row-' + row['id']):
@@ -252,12 +258,10 @@ def item_card(row, lid, *, editing=False):
                 if editing:
                     st.write(label)
                 else:
-                    checked = st.checkbox(label, value=bool(row['bought']),
-                                          key=f"check_{row['id']}_{row['bought']}", width='stretch')
-                    if checked != bool(row['bought']):
-                        ok, _ = action(db.set_bought, lid, row['id'], checked)
-                        if ok:
-                            st.rerun()
+                    key = f"check_{row['id']}_{row['bought']}"
+                    st.checkbox(label, value=bool(row['bought']), key=key, width='stretch',
+                                on_change=change_bought,
+                                args=(lid, row['id'], key, bool(row['bought'])))
         if not editing:
             return
         with st.expander('עריכת כמות, הערה והסרה'):
@@ -277,7 +281,7 @@ def item_card(row, lid, *, editing=False):
                     st.rerun()
 
 
-@st.fragment(run_every='5s')
+@st.fragment(run_every='20s')
 def shopping_items(lid):
     try:
         rows = db.items(lid)
