@@ -80,9 +80,6 @@ def storage(url, path, backend, endpoint, token):
         database = DB(url, path)
     # Initializes the one-time default product image migration on this version.
     database.init()
-    if backend == 'google_drive':
-        from shopping_sync import ShoppingSync
-        database.shopping = ShoppingSync(database)
     return database
 
 
@@ -110,9 +107,13 @@ def action(function, *args, **kwargs):
 
 
 def go(lid, *, edit=False):
-    shopper = getattr(db, 'shopping', None)
-    if shopper and not edit:
-        shopper.refresh(lid, verify=False)
+    draft = st.session_state.get('draft_' + lid)
+    if edit and draft and draft['changes']:
+        st.warning('יש סימונים שלא נשמרו. לחצו על שמור לפני המעבר לעריכה.')
+        return
+    if not edit and draft and not draft['changes']:
+        del st.session_state['draft_' + lid]
+    st.session_state.pop('list_header_' + lid, None)
     st.query_params['list'] = lid
     st.query_params['view'] = 'edit' if edit else 'shop'
     st.rerun()
@@ -247,12 +248,78 @@ def home():
                 go(row['id'])
 
 
+def shopping_draft(lid):
+    key = 'draft_' + lid
+    if key not in st.session_state:
+        rows = db.items(lid)
+        st.session_state[key] = dict(rows=rows, baseline={r['id']: bool(r['bought']) for r in rows},
+                                     changes={}, uncertain=False, saved=False, error='')
+    return st.session_state[key]
+
+
 def change_bought(lid, iid, key, previous):
-    shopper = getattr(db, 'shopping', None)
-    setter = shopper.set_bought if shopper else db.set_bought
-    ok, _ = action(setter, lid, iid, bool(st.session_state[key]))
-    if not ok:
-        st.session_state[key] = previous
+    # Session-only draft: this callback must never read or write Drive.
+    draft = st.session_state['draft_' + lid]
+    value = bool(st.session_state[key])
+    for row in draft['rows']:
+        if row['id'] == iid:
+            row['bought'] = int(value)
+            break
+    if value == draft['baseline'][iid] and not draft['uncertain']:
+        draft['changes'].pop(iid, None)
+    else:
+        draft['changes'][iid] = value
+    draft['saved'] = False
+    if previous:
+        st.session_state['cart_' + lid] = True
+
+
+def save_shopping_draft(lid):
+    draft = st.session_state['draft_' + lid]
+    changes = [(lid, iid, value) for iid, value in draft['changes'].items()]
+    if not changes:
+        return
+    try:
+        if hasattr(db, 'set_bought_batch'):
+            db.set_bought_batch(changes)
+        else:
+            with db.conn() as con:
+                for list_id, iid, value in changes:
+                    result = db.run(con, 'UPDATE items SET bought=? WHERE id=? AND list_id=?',
+                                    (int(value), iid, list_id))
+                    if not result.rowcount:
+                        raise ValueError('מוצר הוסר מהרשימה. השינויים לא נשמרו.')
+    except Exception:
+        # Keep the entire draft. If the reply was lost after a commit, a later
+        # reversal must also be sent even when it equals the old baseline.
+        draft['uncertain'] = True
+        raise
+    draft['baseline'].update(draft['changes'])
+    draft['changes'].clear()
+    draft['uncertain'] = False
+    draft['saved'] = True
+
+
+def refresh_shopping_draft(lid, *, discard=False):
+    draft = st.session_state['draft_' + lid]
+    if draft['changes'] and not discard:
+        raise ValueError('יש לשמור את השינויים לפני רענון הרשימה.')
+    rows = db.refresh_items(lid) if hasattr(db, 'refresh_items') else db.items(lid)
+    draft.update(rows=rows, baseline={r['id']: bool(r['bought']) for r in rows},
+                 changes={}, uncertain=False, saved=False, error='')
+
+
+def draft_action(function, lid, **kwargs):
+    # Fragment callbacks update state only; render errors in the fragment body.
+    draft = st.session_state['draft_' + lid]
+    draft['error'] = ''
+    try:
+        function(lid, **kwargs)
+    except ValueError as exc:
+        draft['error'] = str(exc)
+    except Exception:
+        logging.exception('Manual shopping action failed')
+        draft['error'] = 'הפעולה לא הושלמה. הסימונים שלכם נשארו בטיוטה; נסו שוב.'
 
 
 def item_card(row, lid, *, editing=False):
@@ -267,8 +334,7 @@ def item_card(row, lid, *, editing=False):
                     st.write(label)
                 else:
                     key = f"check_{row['id']}_{row['bought']}"
-                    # Reconcile a failed background save even when it finishes
-                    # before the UI ever renders the optimistic checkbox key.
+                    # Display the current session draft, including unsaved reversals.
                     st.session_state[key] = bool(row['bought'])
                     st.checkbox(label, key=key, width='stretch',
                                 on_change=change_bought,
@@ -292,32 +358,33 @@ def item_card(row, lid, *, editing=False):
                     st.rerun()
 
 
-@st.fragment(run_every='1s' if DRIVE_MODE else '20s')
+@st.fragment
 def shopping_items(lid):
-    shopper = getattr(db, 'shopping', None)
     try:
-        if shopper:
-            state = shopper.view(lid)
-            rows = state['rows']
-            if state['pending']:
-                st.caption(f"☁️ שומר {state['pending']} סימונים… אפשר להמשיך בקנייה; המתינו לאישור לפני הסגירה.")
-            elif state['error']:
-                st.error('השמירה לא אושרה. ' + state['error'])
-            elif not state['loading'] and not state['sync_error']:
-                st.caption('✓ הסימונים נשמרו' if state['saved'] else '✓ הרשימה מסונכרנת')
-            if state['sync_error']:
-                st.warning(state['sync_error'])
-            if state['error'] or state['sync_error']:
-                if st.button('בדיקה מחדש מול Drive', key='refresh_' + lid):
-                    shopper.refresh(lid)
-            if state['loading']:
-                st.caption('טוען את הרשימה…')
-                return
-        else:
-            rows = db.items(lid)
+        draft = shopping_draft(lid)
     except ValueError as exc:
         st.error(str(exc))
         return
+    with st.container(horizontal=True, wrap=False):
+        st.button('💾 שמור', key='save_' + lid, type='primary', disabled=not draft['changes'],
+                  on_click=draft_action, args=(save_shopping_draft, lid))
+        st.button('רענון', key='refresh_' + lid, disabled=bool(draft['changes']),
+                  help='טעינת שינויים ממכשירים אחרים. יש לשמור קודם את הסימונים שלכם.',
+                  on_click=draft_action, args=(refresh_shopping_draft, lid))
+    if draft['error']:
+        st.error(draft['error'])
+    if draft['uncertain']:
+        st.warning('השמירה האחרונה לא אושרה. השינויים עדיין ממתינים לשמירה.')
+        st.button('ביטול השינויים וטעינה מחדש', key='discard_' + lid,
+                  on_click=draft_action, args=(refresh_shopping_draft, lid), kwargs={'discard': True})
+    if draft['changes']:
+        st.caption(f"{len(draft['changes'])} שינויים לא נשמרו · לחצו על שמור לפני סגירה או רענון הדפדפן.")
+    elif draft['saved']:
+        st.caption('✓ השינויים נשמרו')
+    else:
+        st.caption('שמירה ידנית · אין סנכרון אוטומטי')
+    rows = draft['rows']
+
     pending = [r for r in rows if not r['bought']]
     done = [r for r in rows if r['bought']]
     st.progress(len(done) / len(rows) if rows else 0., text=f'{len(done)} בעגלה · {len(pending)} נשארו')
@@ -331,21 +398,26 @@ def shopping_items(lid):
             st.subheader(row['category'])
             previous = row['category']
         item_card(row, lid)
-    if done:
-        with st.expander(f'כבר בעגלה ({len(done)})', expanded=False):
+    if done or st.session_state.get('cart_' + lid, False):
+        # Stable identity plus tracked open state survive count/contents changes.
+        with st.expander('כבר בעגלה', key='cart_' + lid, on_change='rerun'):
+            st.caption(f'{len(done)} מוצרים בעגלה' if done else 'העגלה ריקה')
             for row in done:
                 item_card(row, lid)
 
 
 def list_page(lid):
-    lists = db.query('SELECT * FROM lists WHERE id=?', (lid,))
+    editing = st.query_params.get('view') == 'edit'
+    header_key = 'list_header_' + lid
+    if editing or header_key not in st.session_state:
+        st.session_state[header_key] = db.query('SELECT * FROM lists WHERE id=?', (lid,))
+    lists = st.session_state[header_key]
     if not lists:
         st.warning('הרשימה לא נמצאה. ייתכן שנמחקה.')
         if st.button('לכל הרשימות', use_container_width=True):
             back_to_lists()
         return
     current = lists[0]
-    editing = st.query_params.get('view') == 'edit'
     with st.container(horizontal=True, wrap=False, horizontal_alignment='distribute'):
         if st.button('→ הרשימות שלי'):
             back_to_lists()
